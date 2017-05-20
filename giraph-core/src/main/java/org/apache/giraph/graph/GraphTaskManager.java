@@ -224,10 +224,10 @@ end[PURE_YARN]*/
     context.setStatus("setup: Beginning worker setup.");
     Configuration hadoopConf = context.getConfiguration();
     conf = new ImmutableClassesGiraphConfiguration<I, V, E>(hadoopConf);
+    initializeJobProgressTracker();
     // Setting the default handler for uncaught exceptions.
     Thread.setDefaultUncaughtExceptionHandler(createUncaughtExceptionHandler());
     setupMapperObservers();
-    initializeJobProgressTracker();
     // Write user's graph types (I,V,E,M) back to configuration parameters so
     // that they are set for quicker access later. These types are often
     // inferred from the Computation class used.
@@ -260,6 +260,9 @@ end[PURE_YARN]*/
     context
         .setStatus("setup: Connected to Zookeeper service " + serverPortList);
     this.graphFunctions = determineGraphFunctions(conf, zkManager);
+    if (zkManager != null && this.graphFunctions.isMaster()) {
+      zkManager.cleanupOnExit();
+    }
     try {
       instantiateBspService();
     } catch (IOException e) {
@@ -625,6 +628,8 @@ end[PURE_YARN]*/
       }
       serviceMaster = new BspServiceMaster<I, V, E>(context, this);
       masterThread = new MasterThread<I, V, E>(serviceMaster, context);
+      masterThread.setUncaughtExceptionHandler(
+          createUncaughtExceptionHandler());
       masterThread.start();
     }
     if (graphFunctions.isWorker()) {
