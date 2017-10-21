@@ -107,13 +107,23 @@ public class DefaultJobProgressTrackerService
               break;
             }
 
+            if (!canFinishInTime(conf, job, combinedWorkerProgress)) {
+              killJobWithMessage("Killing the job because it won't " +
+                "complete in max allotted time: " +
+                GiraphConstants.MAX_ALLOWED_JOB_TIME_MS.get(conf) / 1000 +
+                "s");
+            }
+
             if (lastProgress == null ||
                 combinedWorkerProgress.madeProgressFrom(lastProgress)) {
               lastProgress = combinedWorkerProgress;
               lastTimeProgressChanged = System.currentTimeMillis();
             } else if (lastTimeProgressChanged +
                 maxAllowedTimeWithoutProgress < System.currentTimeMillis()) {
-              killTooLongJob();
+              // Job didn't make progress in too long, killing it
+              killJobWithMessage(
+                  "Killing the job because it didn't make progress for " +
+                      maxAllowedTimeWithoutProgress / 1000 + "s");
               break;
             }
           }
@@ -126,17 +136,38 @@ public class DefaultJobProgressTrackerService
   }
 
   /**
-   * Kill the job which was taking too long to make any progress
+   * Determine if the job will finish in allotted time
+   * @param conf Giraph configuration
+   * @param job Job
+   * @param progress Combined worker progress
+   * @return true it the job can finish in allotted time, false otherwise
    */
-  protected void killTooLongJob() {
-    // Job didn't make progress in too long, killing it
+  protected boolean canFinishInTime(GiraphConfiguration conf, Job job,
+      CombinedWorkerProgress progress) {
+    // No defaut implementation.
+    return true;
+  }
+
+  /**
+   * Kill job with message describing why it's being killed
+   *
+   * @param message Message describing why job is being killed
+   * @return True iff job was killed successfully, false if job was already
+   * done or kill failed
+   */
+  protected boolean killJobWithMessage(String message) {
     try {
-      LOG.error("Killing the job because it didn't make progress for " +
-          MAX_ALLOWED_TIME_WITHOUT_PROGRESS_MS.get(conf) / 1000 + "s");
-      job.killJob();
+      if (job.isComplete()) {
+        LOG.info("Job " + job.getJobID() + " is already done");
+        return false;
+      } else {
+        LOG.error(message);
+        job.killJob();
+        return true;
+      }
     } catch (IOException e) {
-      LOG.error(
-          "Failed to kill the job which wasn't making progress", e);
+      LOG.error("Failed to kill the job", e);
+      return false;
     }
   }
 
@@ -159,13 +190,8 @@ public class DefaultJobProgressTrackerService
         @Override
         public void run() {
           if (ThreadUtils.trySleep(maxAllowedJobTimeMs)) {
-            try {
-              LOG.warn("Killing job because it took longer than " +
-                  maxAllowedJobTimeMs + " milliseconds");
-              job.killJob();
-            } catch (IOException e) {
-              LOG.warn("Failed to kill job", e);
-            }
+            killJobWithMessage("Killing the job because it took longer than " +
+                maxAllowedJobTimeMs + " milliseconds");
           }
         }
       }, "job-runtime-observer");
@@ -198,7 +224,8 @@ public class DefaultJobProgressTrackerService
   }
 
   @Override
-  public void logError(String logLine) {
+  public void
+  logError(String logLine, byte [] exByteArray) {
     LOG.error(logLine);
   }
 
