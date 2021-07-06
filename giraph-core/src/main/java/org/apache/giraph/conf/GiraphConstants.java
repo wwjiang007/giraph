@@ -26,6 +26,7 @@ import org.apache.giraph.combiner.MessageCombiner;
 import org.apache.giraph.comm.messages.InMemoryMessageStoreFactory;
 import org.apache.giraph.comm.messages.MessageEncodeAndStoreType;
 import org.apache.giraph.comm.messages.MessageStoreFactory;
+import org.apache.giraph.comm.netty.SSLEventHandler;
 import org.apache.giraph.edge.ByteArrayEdges;
 import org.apache.giraph.edge.DefaultCreateSourceVertexCallback;
 import org.apache.giraph.edge.CreateSourceVertexCallback;
@@ -35,19 +36,24 @@ import org.apache.giraph.edge.OutEdges;
 import org.apache.giraph.factories.ComputationFactory;
 import org.apache.giraph.factories.DefaultComputationFactory;
 import org.apache.giraph.factories.DefaultEdgeValueFactory;
+import org.apache.giraph.factories.DefaultInputOutEdgesFactory;
 import org.apache.giraph.factories.DefaultMessageValueFactory;
+import org.apache.giraph.factories.DefaultOutEdgesFactory;
 import org.apache.giraph.factories.DefaultVertexIdFactory;
 import org.apache.giraph.factories.DefaultVertexValueFactory;
 import org.apache.giraph.factories.EdgeValueFactory;
 import org.apache.giraph.factories.MessageValueFactory;
+import org.apache.giraph.factories.OutEdgesFactory;
 import org.apache.giraph.factories.VertexIdFactory;
 import org.apache.giraph.factories.VertexValueFactory;
 import org.apache.giraph.graph.Computation;
 import org.apache.giraph.graph.DefaultVertex;
 import org.apache.giraph.graph.DefaultVertexResolver;
 import org.apache.giraph.graph.DefaultVertexValueCombiner;
+import org.apache.giraph.graph.JobProgressTrackerClient;
 import org.apache.giraph.graph.Language;
 import org.apache.giraph.graph.MapperObserver;
+import org.apache.giraph.graph.RetryableJobProgressTrackerClient;
 import org.apache.giraph.graph.Vertex;
 import org.apache.giraph.graph.VertexResolver;
 import org.apache.giraph.graph.VertexValueCombiner;
@@ -81,6 +87,7 @@ import org.apache.giraph.partition.GraphPartitionerFactory;
 import org.apache.giraph.partition.HashPartitionerFactory;
 import org.apache.giraph.partition.Partition;
 import org.apache.giraph.partition.SimplePartition;
+import org.apache.giraph.utils.GcObserver;
 import org.apache.giraph.worker.DefaultWorkerContext;
 import org.apache.giraph.worker.WorkerContext;
 import org.apache.giraph.worker.WorkerObserver;
@@ -198,6 +205,16 @@ public interface GiraphConstants {
       ClassConfOption.create("giraph.inputOutEdgesClass",
           ByteArrayEdges.class, OutEdges.class,
           "Vertex edges class to be used during edge input only - optional");
+  /** OutEdges factory class - optional */
+  ClassConfOption<OutEdgesFactory> VERTEX_EDGES_FACTORY_CLASS =
+      ClassConfOption.create("giraph.outEdgesFactoryClass",
+        DefaultOutEdgesFactory.class, OutEdgesFactory.class,
+          "OutEdges factory class - optional");
+  /** OutEdges for input factory class - optional */
+  ClassConfOption<OutEdgesFactory> INPUT_VERTEX_EDGES_FACTORY_CLASS =
+      ClassConfOption.create("giraph.inputOutEdgesFactoryClass",
+        DefaultInputOutEdgesFactory.class, OutEdgesFactory.class,
+          "OutEdges for input factory class - optional");
 
   /** Class for Master - optional */
   ClassConfOption<MasterCompute> MASTER_COMPUTE_CLASS =
@@ -216,6 +233,10 @@ public interface GiraphConstants {
   ClassConfOption<MapperObserver> MAPPER_OBSERVER_CLASSES =
       ClassConfOption.create("giraph.mapper.observers", null,
           MapperObserver.class, "Classes for Mapper Observer - optional");
+  /** Classes for GC Observer - optional */
+  ClassConfOption<GcObserver> GC_OBSERVER_CLASSES =
+      ClassConfOption.create("giraph.gc.observers", null,
+          GcObserver.class, "Classes for GC oObserver - optional");
   /** Message combiner class - optional */
   ClassConfOption<MessageCombiner> MESSAGE_COMBINER_CLASS =
       ClassConfOption.create("giraph.messageCombinerClass", null,
@@ -633,15 +654,6 @@ public interface GiraphConstants {
       new StrConfOption("giraph.nettyCompressionAlgorithm", "",
           "Which compression algorithm to use in netty");
 
-  /**
-   * Whether netty should pro-actively read requests and feed them to its
-   * processing pipeline
-   */
-  BooleanConfOption NETTY_AUTO_READ =
-      new BooleanConfOption("giraph.nettyAutoRead", true,
-          "Whether netty should pro-actively read requests and feed them to " +
-              "its processing pipeline");
-
   /** Max resolve address attempts */
   IntConfOption MAX_RESOLVE_ADDRESS_ATTEMPTS =
       new IntConfOption("giraph.maxResolveAddressAttempts", 5,
@@ -667,10 +679,29 @@ public interface GiraphConstants {
           "Maximum milliseconds to wait before giving up trying to get the " +
           "minimum number of workers before a superstep (int).");
 
+  /**
+   * Maximum milliseconds to wait before giving up waiting for the workers to
+   * write the counters to the Zookeeper after a superstep
+   */
+  IntConfOption MAX_COUNTER_WAIT_MSECS = new IntConfOption(
+          "giraph.maxCounterWaitMsecs", MINUTES.toMillis(2),
+          "Maximum milliseconds to wait before giving up waiting for" +
+                  "the workers to write their counters to the " +
+                  "zookeeper after a superstep");
+
   /** Milliseconds for a request to complete (or else resend) */
   IntConfOption MAX_REQUEST_MILLISECONDS =
       new IntConfOption("giraph.maxRequestMilliseconds", MINUTES.toMillis(10),
           "Milliseconds for a request to complete (or else resend)");
+
+  /**
+   * Whether to resend request which timed out or fail the job if timeout
+   * happens
+   */
+  BooleanConfOption RESEND_TIMED_OUT_REQUESTS =
+      new BooleanConfOption("giraph.resendTimedOutRequests", true,
+          "Whether to resend request which timed out or fail the job if " +
+              "timeout happens");
 
   /** Netty max connection failures */
   IntConfOption NETTY_MAX_CONNECTION_FAILURES =
@@ -1043,6 +1074,15 @@ public interface GiraphConstants {
           "Whether to use SASL with DIGEST and Hadoop Job Tokens to " +
           "authenticate and authorize Netty BSP Clients to Servers.");
 
+  /**
+   * Whether to use SSL to authenticate and authorize "
+   * Netty BSP Clients to Servers.
+   */
+  BooleanConfOption SSL_ENCRYPT =
+    new BooleanConfOption("giraph.sslEncrypt", false,
+        "Whether to use SSL to authenticate and authorize " +
+            "Netty BSP Clients to Servers.");
+
   /** Use unsafe serialization? */
   BooleanConfOption USE_UNSAFE_SERIALIZATION =
       new BooleanConfOption("giraph.useUnsafeSerialization", true,
@@ -1174,9 +1214,17 @@ public interface GiraphConstants {
       new BooleanConfOption("giraph.trackJobProgressOnClient", false,
           "Whether to track job progress on client or not");
 
+  /** Class to use as the job progress client */
+  ClassConfOption<JobProgressTrackerClient> JOB_PROGRESS_TRACKER_CLIENT_CLASS =
+      ClassConfOption.create("giraph.jobProgressTrackerClientClass",
+        RetryableJobProgressTrackerClient.class,
+          JobProgressTrackerClient.class,
+          "Class to use to make calls to the job progress tracker service");
+
   /** Class to use to track job progress on client */
-  ClassConfOption<JobProgressTrackerService> JOB_PROGRESS_TRACKER_CLASS =
-      ClassConfOption.create("giraph.jobProgressTrackerClass",
+  ClassConfOption<JobProgressTrackerService>
+    JOB_PROGRESS_TRACKER_SERVICE_CLASS =
+      ClassConfOption.create("giraph.jobProgressTrackerServiceClass",
           DefaultJobProgressTrackerService.class,
           JobProgressTrackerService.class,
           "Class to use to track job progress on client");
@@ -1274,5 +1322,34 @@ public interface GiraphConstants {
   /** Number of supersteps job will run for */
   IntConfOption SUPERSTEP_COUNT = new IntConfOption("giraph.numSupersteps", -1,
       "Number of supersteps job will run for");
+
+  /** Whether to disable GiraphClassResolver which is an efficient
+   * implementation of kryo class resolver. By default this resolver is used by
+   * KryoSimpleWritable and KryoSimpleWrapper, and can be disabled with this
+   * option */
+  BooleanConfOption DISABLE_GIRAPH_CLASS_RESOLVER =
+          new BooleanConfOption("giraph.disableGiraphClassResolver", false,
+            "Disables GiraphClassResolver, which is a custom implementation " +
+            "of kryo class resolver that avoids writing class names to the " +
+            "underlying stream for faster serialization.");
+
+  /**
+   * Path where jmap exists
+   */
+  StrConfOption JMAP_PATH = new StrConfOption("giraph.jmapPath", "jmap",
+          "Path to use for invoking jmap");
+
+  /**
+   * Whether to fail the job or just warn when input is empty
+   */
+  BooleanConfOption FAIL_ON_EMPTY_INPUT = new BooleanConfOption(
+      "giraph.failOnEmptyInput", true,
+      "Whether to fail the job or just warn when input is empty");
+
+  /** SSLEventHandler class - optional */
+  ClassConfOption<SSLEventHandler> SSL_EVENT_HANDLER_CLASS =
+    ClassConfOption.create("giraph.sslEventHandler",
+      null, SSLEventHandler.class,
+      "SSLEventHandler class - optional");
 }
 // CHECKSTYLE: resume InterfaceIsTypeCheck

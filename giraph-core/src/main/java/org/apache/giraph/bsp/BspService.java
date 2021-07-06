@@ -25,6 +25,7 @@ import org.apache.giraph.job.JobProgressTracker;
 import org.apache.giraph.partition.GraphPartitionerFactory;
 import org.apache.giraph.utils.CheckpointingUtils;
 import org.apache.giraph.worker.WorkerInfo;
+import org.apache.giraph.writable.kryo.GiraphClassResolver;
 import org.apache.giraph.zk.BspEvent;
 import org.apache.giraph.zk.PredicateLock;
 import org.apache.giraph.zk.ZooKeeperExt;
@@ -81,7 +82,9 @@ public abstract class BspService<I extends WritableComparable,
   /** Input splits all done node*/
   public static final String INPUT_SPLITS_ALL_DONE_NODE =
       "/_inputSplitsAllDone";
-
+  /** Directory to store kryo className-ID assignment */
+  public static final String KRYO_REGISTERED_CLASS_DIR =
+          "/_kryo";
   /** Directory of attempts of this application */
   public static final String APPLICATION_ATTEMPTS_DIR =
       "/_applicationAttemptsDir";
@@ -89,6 +92,10 @@ public abstract class BspService<I extends WritableComparable,
   public static final String MASTER_ELECTION_DIR = "/_masterElectionDir";
   /** Superstep scope */
   public static final String SUPERSTEP_DIR = "/_superstepDir";
+  /** Counter sub directory */
+  public static final String COUNTERS_DIR = "/_counters";
+  /** Metrics sub directory */
+  public static final String METRICS_DIR = "/_metrics";
   /** Healthy workers register here. */
   public static final String WORKER_HEALTHY_DIR = "/_workerHealthyDir";
   /** Unhealthy workers register here. */
@@ -155,6 +162,8 @@ public abstract class BspService<I extends WritableComparable,
   protected final String haltComputationPath;
   /** Path where memory observer stores data */
   protected final String memoryObserverPath;
+  /** Kryo className-ID mapping directory */
+  protected final String kryoRegisteredClassPath;
   /** Private ZooKeeper instance that implements the service */
   private final ZooKeeperExt zk;
   /** Has the Connection occurred? */
@@ -173,6 +182,9 @@ public abstract class BspService<I extends WritableComparable,
   private final BspEvent masterElectionChildrenChanged;
   /** Cleaned up directory children changed*/
   private final BspEvent cleanedUpChildrenChanged;
+  /** Event to synchronize when workers have written their counters to the
+   * zookeeper*/
+  private final BspEvent writtenCountersToZK;
   /** Registered list of BspEvents */
   private final List<BspEvent> registeredBspEvents =
       new ArrayList<BspEvent>();
@@ -218,6 +230,7 @@ public abstract class BspService<I extends WritableComparable,
     this.superstepFinished = new PredicateLock(context);
     this.masterElectionChildrenChanged = new PredicateLock(context);
     this.cleanedUpChildrenChanged = new PredicateLock(context);
+    this.writtenCountersToZK = new PredicateLock(context);
 
     registerBspEvent(connectedEvent);
     registerBspEvent(workerHealthRegistrationChanged);
@@ -227,6 +240,7 @@ public abstract class BspService<I extends WritableComparable,
     registerBspEvent(superstepFinished);
     registerBspEvent(masterElectionChildrenChanged);
     registerBspEvent(cleanedUpChildrenChanged);
+    registerBspEvent(writtenCountersToZK);
 
     this.context = context;
     this.graphTaskManager = graphTaskManager;
@@ -243,14 +257,16 @@ public abstract class BspService<I extends WritableComparable,
     this.graphPartitionerFactory = conf.createGraphPartitioner();
 
     basePath = ZooKeeperManager.getBasePath(conf) + BASE_DIR + "/" + jobId;
-    getContext().getCounter(GiraphConstants.ZOOKEEPER_BASE_PATH_COUNTER_GROUP,
-        basePath);
+    if (LOG.isInfoEnabled()) {
+      LOG.info(String.format("%s: %s",
+              GiraphConstants.ZOOKEEPER_BASE_PATH_COUNTER_GROUP, basePath));
+    }
     masterJobStatePath = basePath + MASTER_JOB_STATE_NODE;
     inputSplitsWorkerDonePath = basePath + INPUT_SPLITS_WORKER_DONE_DIR;
     inputSplitsAllDonePath = basePath + INPUT_SPLITS_ALL_DONE_NODE;
     applicationAttemptsPath = basePath + APPLICATION_ATTEMPTS_DIR;
     cleanedUpPath = basePath + CLEANED_UP_DIR;
-
+    kryoRegisteredClassPath = basePath + KRYO_REGISTERED_CLASS_DIR;
 
 
     String restartJobId = RESTART_JOB_ID.get(conf);
@@ -289,6 +305,11 @@ public abstract class BspService<I extends WritableComparable,
       throw new RuntimeException(e);
     }
 
+    boolean disableGiraphResolver =
+            GiraphConstants.DISABLE_GIRAPH_CLASS_RESOLVER.get(conf);
+    if (!disableGiraphResolver) {
+      GiraphClassResolver.setZookeeperInfo(zk, kryoRegisteredClassPath);
+    }
     this.taskId = (int) getApplicationAttempt() * conf.getMaxWorkers() +
             conf.getTaskPartition();
     this.hostnameTaskId = hostname + "_" + getTaskId();
@@ -411,15 +432,31 @@ public abstract class BspService<I extends WritableComparable,
 
   /**
    * Generate the worker "finished" directory path for a
-   * superstep
+   * superstep, for storing the superstep-related metrics
    *
    * @param attempt application attempt number
    * @param superstep superstep to use
    * @return directory path based on the a superstep
    */
-  public final String getWorkerFinishedPath(long attempt, long superstep) {
+  public final String getWorkerMetricsFinishedPath(
+          long attempt, long superstep) {
     return applicationAttemptsPath + "/" + attempt +
-        SUPERSTEP_DIR + "/" + superstep + WORKER_FINISHED_DIR;
+            SUPERSTEP_DIR + "/" + superstep + WORKER_FINISHED_DIR + METRICS_DIR;
+  }
+
+  /**
+   * Generate the worker "finished" directory path for a
+   * superstep, for storing the superstep-related counters
+   *
+   * @param attempt application attempt number
+   * @param superstep superstep to use
+   * @return directory path based on the a superstep
+   */
+  public final String getWorkerCountersFinishedPath(
+          long attempt, long superstep) {
+    return applicationAttemptsPath + "/" + attempt +
+            SUPERSTEP_DIR + "/" + superstep +
+            WORKER_FINISHED_DIR + COUNTERS_DIR;
   }
 
   /**
@@ -573,6 +610,10 @@ public abstract class BspService<I extends WritableComparable,
 
   public final BspEvent getCleanedUpChildrenChangedEvent() {
     return cleanedUpChildrenChanged;
+  }
+
+  public final BspEvent getWrittenCountersToZKEvent() {
+    return writtenCountersToZK;
   }
 
   /**
@@ -900,6 +941,11 @@ public abstract class BspService<I extends WritableComparable,
         LOG.info("process: cleanedUpChildrenChanged signaled");
       }
       cleanedUpChildrenChanged.signal();
+      eventProcessed = true;
+    } else if (event.getPath().endsWith(COUNTERS_DIR) &&
+            event.getType() == EventType.NodeChildrenChanged) {
+      LOG.info("process: writtenCountersToZK signaled");
+      getWrittenCountersToZKEvent().signal();
       eventProcessed = true;
     }
 

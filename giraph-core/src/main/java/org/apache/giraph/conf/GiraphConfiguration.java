@@ -51,6 +51,7 @@ import org.apache.giraph.master.MasterObserver;
 import org.apache.giraph.partition.GraphPartitionerFactory;
 import org.apache.giraph.partition.Partition;
 import org.apache.giraph.partition.ReusesObjectsPartition;
+import org.apache.giraph.utils.GcObserver;
 import org.apache.giraph.utils.ReflectionUtils;
 import org.apache.giraph.worker.WorkerContext;
 import org.apache.giraph.worker.WorkerObserver;
@@ -321,6 +322,16 @@ public class GiraphConfiguration extends Configuration
   public final void addMapperObserverClass(
       Class<? extends MapperObserver> mapperObserverClass) {
     MAPPER_OBSERVER_CLASSES.add(this, mapperObserverClass);
+  }
+
+  /**
+   * Add a GcObserver class (optional)
+   *
+   * @param gcObserverClass GcObserver class to add.
+   */
+  public final void addGcObserverClass(
+      Class<? extends GcObserver> gcObserverClass) {
+    GC_OBSERVER_CLASSES.add(this, gcObserverClass);
   }
 
   /**
@@ -660,6 +671,16 @@ public class GiraphConfiguration extends Configuration
   }
 
   /**
+   * How many mappers is job asking for, taking into account whether master
+   * is running on the same mapper as worker or not
+   *
+   * @return How many mappers is job asking for
+   */
+  public final int getMaxMappers() {
+    return getMaxWorkers() + (SPLIT_MASTER_WORKER.get(this) ? 1 : 0);
+  }
+
+  /**
    * Utilize an existing ZooKeeper service.  If this is not set, ZooKeeper
    * will be dynamically started by Giraph for this job.
    *
@@ -704,6 +725,15 @@ public class GiraphConfiguration extends Configuration
    */
   public Class<? extends MapperObserver>[] getMapperObserverClasses() {
     return MAPPER_OBSERVER_CLASSES.getArray(this);
+  }
+
+  /**
+   * Get array of GcObserver classes set in configuration.
+   *
+   * @return array of GcObserver classes.
+   */
+  public Class<? extends GcObserver>[] getGcObserverClasses() {
+    return GC_OBSERVER_CLASSES.getArray(this);
   }
 
   /**
@@ -927,6 +957,15 @@ public class GiraphConfiguration extends Configuration
   }
 
   /**
+   * Use authentication? (if supported)
+   *
+   * @return True if should authenticate, false otherwise
+   */
+  public boolean sslAuthenticate() {
+    return SSL_ENCRYPT.get(this);
+  }
+
+  /**
    * Set the number of compute threads
    *
    * @param numComputeThreads Number of compute threads to use
@@ -967,16 +1006,6 @@ public class GiraphConfiguration extends Configuration
    */
   public void useUnsafeSerialization(boolean useUnsafeSerialization) {
     USE_UNSAFE_SERIALIZATION.set(this, useUnsafeSerialization);
-  }
-
-  /**
-   * Use message size encoding?  This feature may help with complex message
-   * objects.
-   *
-   * @return Whether to use message size encoding
-   */
-  public boolean useMessageSizeEncoding() {
-    return USE_MESSAGE_SIZE_ENCODING.get(this);
   }
 
   /**
@@ -1066,6 +1095,10 @@ public class GiraphConfiguration extends Configuration
    */
   public int getMaxMasterSuperstepWaitMsecs() {
     return MAX_MASTER_SUPERSTEP_WAIT_MSECS.get(this);
+  }
+
+  public int getMaxCounterWaitMsecs() {
+    return MAX_COUNTER_WAIT_MSECS.get(this);
   }
 
   /**

@@ -28,6 +28,7 @@ import io.netty.handler.codec.compression.SnappyFramedEncoder;
 import org.apache.giraph.aggregators.AggregatorWriter;
 import org.apache.giraph.combiner.MessageCombiner;
 import org.apache.giraph.comm.messages.MessageEncodeAndStoreType;
+import org.apache.giraph.comm.netty.SSLEventHandler;
 import org.apache.giraph.edge.Edge;
 import org.apache.giraph.edge.EdgeFactory;
 import org.apache.giraph.edge.EdgeStoreFactory;
@@ -36,6 +37,7 @@ import org.apache.giraph.edge.ReusableEdge;
 import org.apache.giraph.factories.ComputationFactory;
 import org.apache.giraph.factories.EdgeValueFactory;
 import org.apache.giraph.factories.MessageValueFactory;
+import org.apache.giraph.factories.OutEdgesFactory;
 import org.apache.giraph.factories.ValueFactories;
 import org.apache.giraph.factories.VertexIdFactory;
 import org.apache.giraph.factories.VertexValueFactory;
@@ -75,6 +77,7 @@ import org.apache.giraph.utils.ExtendedByteArrayDataInput;
 import org.apache.giraph.utils.ExtendedByteArrayDataOutput;
 import org.apache.giraph.utils.ExtendedDataInput;
 import org.apache.giraph.utils.ExtendedDataOutput;
+import org.apache.giraph.utils.GcObserver;
 import org.apache.giraph.utils.ReflectionUtils;
 import org.apache.giraph.utils.UnsafeByteArrayInputStream;
 import org.apache.giraph.utils.UnsafeByteArrayOutputStream;
@@ -112,6 +115,10 @@ public class ImmutableClassesGiraphConfiguration<I extends WritableComparable,
   private Class<? extends Writable> mappingTargetClass = null;
   /** Value (IVEMM) Factories */
   private final ValueFactories<I, V, E> valueFactories;
+  /** Factory to create {@link OutEdges} for computation */
+  private final OutEdgesFactory<I, E> outEdgesFactory;
+  /** Factory to create {@link OutEdges} for input */
+  private final OutEdgesFactory<I, E> inputOutEdgesFactory;
   /** Language values (IVEMM) are implemented in */
   private final PerGraphTypeEnum<Language> valueLanguages;
   /** Whether values (IVEMM) need Jython wrappers */
@@ -130,6 +137,8 @@ public class ImmutableClassesGiraphConfiguration<I extends WritableComparable,
   private final boolean useBigDataIOForMessages;
   /** Is the graph static (meaning there is no mutation)? */
   private final boolean isStaticGraph;
+  /** Whether or not to use message size encoding */
+  private final boolean useMessageSizeEncoding;
 
   /**
    * Constructor.  Takes the configuration and then gets the classes out of
@@ -148,6 +157,9 @@ public class ImmutableClassesGiraphConfiguration<I extends WritableComparable,
         GiraphConstants.GRAPH_TYPES_NEEDS_WRAPPERS, conf);
     isStaticGraph = GiraphConstants.STATIC_GRAPH.get(this);
     valueFactories = new ValueFactories<I, V, E>(this);
+    outEdgesFactory = VERTEX_EDGES_FACTORY_CLASS.newInstance(this);
+    inputOutEdgesFactory = INPUT_VERTEX_EDGES_FACTORY_CLASS.newInstance(this);
+    useMessageSizeEncoding = USE_MESSAGE_SIZE_ENCODING.get(conf);
   }
 
   /**
@@ -533,6 +545,28 @@ public class ImmutableClassesGiraphConfiguration<I extends WritableComparable,
   }
 
   /**
+   * Get the user's subclassed {@link SSLEventHandler}.
+   *
+   * @return User's SSL Event Handler class
+   */
+  public Class<? extends SSLEventHandler> getSSLEventHandlerClass() {
+    return SSL_EVENT_HANDLER_CLASS.get(this);
+  }
+
+  /**
+   * Create a user SSLEventHandler class
+   *
+   * @return Instantiated user SSL Event Handler class
+   */
+  public SSLEventHandler createSSLEventHandler() {
+    if (getSSLEventHandlerClass() != null) {
+      return ReflectionUtils.newInstance(getSSLEventHandlerClass(), this);
+    } else {
+      return null;
+    }
+  }
+
+  /**
    * Get the user's subclassed
    * {@link org.apache.giraph.graph.VertexValueCombiner} class.
    *
@@ -773,6 +807,22 @@ public class ImmutableClassesGiraphConfiguration<I extends WritableComparable,
       Mapper<?, ?, ?, ?>.Context context) {
     Class<? extends MapperObserver>[] klasses = getMapperObserverClasses();
     MapperObserver[] objects = new MapperObserver[klasses.length];
+    for (int i = 0; i < klasses.length; ++i) {
+      objects[i] = ReflectionUtils.newInstance(klasses[i], this, context);
+    }
+    return objects;
+  }
+
+  /**
+   * Create array of GcObservers.
+   *
+   * @param context Mapper context
+   * @return Instantiated array of GcObservers.
+   */
+  public GcObserver[] createGcObservers(
+      Mapper<?, ?, ?, ?>.Context context) {
+    Class<? extends GcObserver>[] klasses = getGcObserverClasses();
+    GcObserver[] objects = new GcObserver[klasses.length];
     for (int i = 0; i < klasses.length; ++i) {
       objects[i] = ReflectionUtils.newInstance(klasses[i], this, context);
     }
@@ -1083,7 +1133,7 @@ public class ImmutableClassesGiraphConfiguration<I extends WritableComparable,
    * @return Instantiated user OutEdges
    */
   public OutEdges<I, E> createOutEdges() {
-    return ReflectionUtils.newInstance(getOutEdgesClass(), this);
+    return outEdgesFactory.newInstance();
   }
 
   /**
@@ -1132,7 +1182,7 @@ public class ImmutableClassesGiraphConfiguration<I extends WritableComparable,
    * @return Instantiated user input OutEdges
    */
   public OutEdges<I, E> createInputOutEdges() {
-    return ReflectionUtils.newInstance(getInputOutEdgesClass(), this);
+    return inputOutEdgesFactory.newInstance();
   }
 
   /**
@@ -1328,7 +1378,7 @@ public class ImmutableClassesGiraphConfiguration<I extends WritableComparable,
   public ByteToMessageDecoder getNettyCompressionDecoder() {
     switch (GiraphConstants.NETTY_COMPRESSION_ALGORITHM.get(this)) {
     case "SNAPPY":
-      return new SnappyFramedDecoder(true);
+      return new SnappyFramedDecoder();
     case "INFLATE":
       return new JdkZlibDecoder();
     default:
@@ -1350,5 +1400,15 @@ public class ImmutableClassesGiraphConfiguration<I extends WritableComparable,
    */
   public String getJobId() {
     return get("mapred.job.id", "UnknownJob");
+  }
+
+  /**
+   * Use message size encoding?  This feature may help with complex message
+   * objects.
+   *
+   * @return Whether to use message size encoding
+   */
+  public boolean useMessageSizeEncoding() {
+    return useMessageSizeEncoding;
   }
 }

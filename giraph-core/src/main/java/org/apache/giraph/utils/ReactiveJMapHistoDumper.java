@@ -22,8 +22,12 @@ import org.apache.giraph.conf.DefaultImmutableClassesGiraphConfigurable;
 import org.apache.giraph.conf.GiraphConstants;
 import org.apache.giraph.conf.ImmutableClassesGiraphConfiguration;
 import org.apache.giraph.master.MasterObserver;
+import org.apache.giraph.metrics.AggregatedMetrics;
+import org.apache.giraph.partition.PartitionStats;
 import org.apache.giraph.worker.WorkerObserver;
 import org.apache.log4j.Logger;
+
+import java.util.List;
 
 /**
  * An observer for both worker and master that periodically checks if available
@@ -50,6 +54,8 @@ public class ReactiveJMapHistoDumper extends
   private Thread thread;
   /** Halt jmap thread */
   private volatile boolean stop = false;
+  /** Path to jmap*/
+  private String jmapPath;
 
   @Override
   public void preLoad() {
@@ -96,7 +102,7 @@ public class ReactiveJMapHistoDumper extends
           long potentialMemory = (runtime.maxMemory() -
               runtime.totalMemory()) + runtime.freeMemory();
           if (potentialMemory / MB < minFreeMemory) {
-            JMap.heapHistogramDump(linesToPrint);
+            JMap.heapHistogramDump(linesToPrint, jmapPath);
           }
           ThreadUtils.trySleep(sleepMillis);
         }
@@ -111,6 +117,11 @@ public class ReactiveJMapHistoDumper extends
   public void postSuperstep(long superstep) { }
 
   @Override
+  public void superstepMetricsUpdate(long superstep,
+      AggregatedMetrics aggregatedMetrics,
+      List<PartitionStats> partitionStatsList) { }
+
+  @Override
   public void applicationFailed(Exception e) { }
 
   @Override
@@ -118,5 +129,6 @@ public class ReactiveJMapHistoDumper extends
     sleepMillis = GiraphConstants.JMAP_SLEEP_MILLIS.get(configuration);
     linesToPrint = GiraphConstants.JMAP_PRINT_LINES.get(configuration);
     minFreeMemory = GiraphConstants.MIN_FREE_MBS_ON_HEAP.get(configuration);
+    jmapPath = GiraphConstants.JMAP_PATH.get(configuration);
   }
 }
